@@ -142,4 +142,7 @@ Thumbs.db
 
 # Logs folder/files (optional, if you create log files)
 logs/
-*.log 
+*.log
+
+# Model files
+models/*.onnx 

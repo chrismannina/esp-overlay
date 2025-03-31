@@ -8,7 +8,6 @@ This project is a Minimum Viable Product (MVP) for a real-time ESP (Extra Sensor
 
 *   **Modular Design:** Separate modules for capture, AI processing, and overlay rendering.
 *   **Multiple Capture Sources:** Supports standard webcams, UVC-compliant capture cards, and screen capture (configured via hardcoded values).
-*   **Hardcoded Configuration:** Simulates cheats that embed settings to avoid external config files.
 *   **Dynamic Library Loading:** Uses `importlib` to load heavy dependencies (`opencv`, `onnxruntime`, `mss`) dynamically, slightly obscuring imports.
 *   **Real-time Processing:** Uses multi-threading for capture and AI inference.
 *   **ONNX Runtime:** Leverages ONNX Runtime for AI inference (CPU/GPU based on hardcoded setting).
@@ -79,17 +78,69 @@ esp-overlay/
 3.  An OpenCV window should appear displaying the video feed with bounding boxes.
 4.  Press **'q'** in the output window to quit.
 
-## Packaging (Optional Obfuscation)
+## Packaging with PyInstaller
 
-To further simulate a distributed cheat, package the application into an executable using PyInstaller:
+To create a standalone executable for easier distribution or obfuscation, you can use PyInstaller.
 
-```bash
-pip install pyinstaller
-# Adjust name and add necessary data files (like the models dir)
-# --noconsole hides the terminal window
-pyinstaller --onefile --noconsole --name "updater" --add-data "models:models" main.py
-```
-This creates `dist/updater.exe` (or `dist/updater` on Linux/macOS), which is the self-contained application.
+1.  **Install PyInstaller:**
+    ```bash
+    pip install pyinstaller
+    ```
+
+2.  **Generate Executable:**
+    Navigate to the project's root directory in your terminal and run:
+
+    ```bash
+    pyinstaller --noconsole --onefile --name=esp_overlay_tool main.py
+    ```
+
+    *   `--noconsole`: Prevents the console window from appearing when the executable runs (important for overlays).
+    *   `--onefile`: Packages everything into a single executable file.
+    *   `--name=esp_overlay_tool`: Sets the name of the output executable and related files/folders.
+    *   `main.py`: Specifies the main script of your application.
+
+3.  **Include Assets (Models):**
+    PyInstaller might not automatically include data files like your `.onnx` model. You need to tell it where to find them.
+
+    *   **Option A (Using `--add-data`):**
+        This is often the easiest way. You specify the source path and the destination path within the bundle. The syntax is `source:destination` or `source;destination` (use `;` on Windows, `:` on Mac/Linux).
+
+        ```bash
+        # Example for macOS/Linux (assuming model is in ./models)
+        pyinstaller --noconsole --onefile --name=esp_overlay_tool --add-data "models/*.onnx:models" main.py
+
+        # Example for Windows (assuming model is in ./models)
+        pyinstaller --noconsole --onefile --name=esp_overlay_tool --add-data "models\\*.onnx;models" main.py
+        ```
+        Inside your code (`main.py` or wherever the model is loaded), you'll need to adjust the path to find the model within the packaged structure. PyInstaller sets up a temporary directory at runtime. You can get the base path like this:
+
+        ```python
+        import sys
+        import os
+
+        def resource_path(relative_path):
+            """ Get absolute path to resource, works for dev and for PyInstaller """
+            try:
+                # PyInstaller creates a temp folder and stores path in _MEIPASS
+                base_path = sys._MEIPASS
+            except Exception:
+                base_path = os.path.abspath(".")
+
+            return os.path.join(base_path, relative_path)
+
+        # Example usage when loading the model:
+        # model_path = resource_path("models/your_model.onnx")
+        # model = cv2.dnn.readNetFromONNX(model_path)
+        ```
+        **Remember to replace `"models/your_model.onnx"` with your actual model file path relative to the project root and update the model loading code in `processing.py` to use `resource_path`.**
+
+    *   **Option B (Spec File):**
+        For more complex scenarios, you can generate a `.spec` file (`pyinstaller main.py`) and then edit it manually to include data files before building (`pyinstaller main.spec`). This offers more control.
+
+4.  **Locate Executable:**
+    After running PyInstaller, the executable will be located in the `dist` directory.
+
+**Note:** Anti-cheat software often looks for signatures of known tools like PyInstaller. More advanced cheats might use custom loaders or packers to further obfuscate the executable.
 
 ## Anti-Cheat Testing Considerations
 

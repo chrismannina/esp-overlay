@@ -3,6 +3,7 @@ import time
 import yaml
 import logging
 import os
+import sys
 from cryptography.fernet import Fernet
 
 # Basic logging setup
@@ -28,4 +29,14 @@ class FPSCounter:
 
     def get_fps(self):
         """Get the current calculated FPS."""
-        return self._fps 
+        return self._fps
+
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+
+    return os.path.join(base_path, relative_path) 

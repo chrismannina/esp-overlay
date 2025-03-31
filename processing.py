@@ -4,8 +4,9 @@ import numpy as np
 import time
 import threading
 import importlib
-from queue import Queue, Empty
-from utils import logger
+import math # Added for distance calculation
+from queue import Queue, Empty, Full # Added Full exception
+from utils import logger, resource_path # Added resource_path
 # import cv2 # Dynamic import
 # Import constants from main (or define them here)
 from config_constants import (
@@ -54,7 +55,15 @@ class AIProcessor:
 
     def _load_model(self):
         """Loads the ONNX model and prepares the inference session."""
-        model_path = CONFIG_MODEL_PATH
+        # Use resource_path to find the model, works in dev and PyInstaller bundle
+        try:
+            model_path = resource_path(CONFIG_MODEL_PATH)
+            logger.info(f"Attempting to load ONNX model from: {model_path}")
+        except Exception as e:
+            logger.error(f"Failed to get resource path for model '{CONFIG_MODEL_PATH}': {e}")
+            self.session = None
+            return
+
         logger.info(f"Loading ONNX model from: {model_path}")
         try:
             providers = _ort.get_available_providers()
@@ -86,6 +95,9 @@ class AIProcessor:
             if not isinstance(self.input_shape, list) or len(self.input_shape) != 4 or not isinstance(self.input_shape[0], (int, str)) or self.input_shape[0] != 1:
                  logger.warning("Model input shape might not be standard BHWC or BCHW. Ensure preprocessing matches.")
 
+        except FileNotFoundError:
+            logger.error(f"Model file not found at resolved path: {model_path}")
+            self.session = None
         except Exception as e:
             logger.error(f"Failed to load ONNX model or create session: {e}", exc_info=True)
             self.session = None # Ensure session is None if loading failed
@@ -130,7 +142,7 @@ class AIProcessor:
         return img, r, (dw, dh) # Return preprocessed image and scaling info
 
     def _postprocess(self, outputs, scale_ratio, pad_offset, frame_shape):
-        """Processes the raw model output. Assumes YOLOv5 output format."""
+        """Processes the raw model output, performs NMS, and finds the closest target to the center."""
         # Output format typically [batch, num_detections, xywh + confidence + num_classes]
         # Example shape: [1, 25200, 85] for COCO (80 classes + 5)
         predictions = outputs[0][0] # Get predictions for the first (only) image in the batch
@@ -140,7 +152,7 @@ class AIProcessor:
         candidates = predictions[predictions[:, 4] > conf_thres]
 
         if not candidates.shape[0]:
-            return []
+            return [], None # Return empty list and None for closest target
 
         # Filter by class if specified
         classes_to_detect = CONFIG_CLASSES_TO_DETECT
@@ -155,7 +167,7 @@ class AIProcessor:
             class_scores = class_scores[mask]
 
             if not candidates.shape[0]:
-                return []
+                return [], None # Return empty list and None for closest target
             # Overwrite confidence with class-specific score
             candidates[:, 4] = class_scores
         else:
@@ -188,7 +200,6 @@ class AIProcessor:
         boxes_xyxy[:, [1, 3]] = np.clip(boxes_xyxy[:, [1, 3]], 0, frame_h)
 
         # Perform Non-Maximum Suppression (NMS)
-        # If cv2 is available, use its NMS implementation
         if _cv2:
             confidences = candidates[:, 4]
             nms_thres = CONFIG_NMS_THRESHOLD
@@ -208,21 +219,55 @@ class AIProcessor:
             indices = np.arange(len(boxes_xyxy))
 
         detections = []
+        closest_target = None
+        min_dist_sq = float('inf') # Use squared distance to avoid sqrt calculation in loop
+        frame_h, frame_w = frame_shape[:2]
+        screen_center_x, screen_center_y = frame_w // 2, frame_h // 2
+
+        valid_indices = []
         if len(indices) > 0:
              # If indices is a flat array (possible with OpenCV NMS), flatten it
-            if isinstance(indices, np.ndarray): indices = indices.flatten()
+            if isinstance(indices, np.ndarray) and indices.ndim > 1: # Check if needs flattening
+                 indices = indices.flatten()
+            valid_indices = indices # Use the NMS results
 
-            for i in indices:
+        # Prepare all detections first
+        all_detections_after_nms = []
+        if len(valid_indices) > 0:
+            for i in valid_indices:
                 box = boxes_xyxy[i].astype(int).tolist() # Convert to int list [x1, y1, x2, y2]
                 confidence = float(confidences[i])
                 class_id = int(class_indices[i])
-                detections.append({
+                all_detections_after_nms.append({
                     'bbox': box,          # [x_min, y_min, x_max, y_max]
                     'confidence': confidence,
-                    'class_id': class_id
+                    'class_id': class_id,
+                    'is_closest': False # Initialize flag
                     # Add other info like 'label' if you have a class map
                 })
-        return detections
+
+        # Now find the closest among the filtered detections
+        closest_target_idx = -1
+        if all_detections_after_nms: # Check if list is not empty
+            for i, det in enumerate(all_detections_after_nms):
+                box = det['bbox']
+                box_center_x = (box[0] + box[2]) // 2
+                box_center_y = (box[1] + box[3]) // 2
+
+                # Calculate squared Euclidean distance
+                dist_sq = (box_center_x - screen_center_x)**2 + (box_center_y - screen_center_y)**2
+
+                if dist_sq < min_dist_sq:
+                    min_dist_sq = dist_sq
+                    closest_target_idx = i
+
+            if closest_target_idx != -1:
+                all_detections_after_nms[closest_target_idx]['is_closest'] = True
+                closest_target = all_detections_after_nms[closest_target_idx]
+                # Optional: Add distance to closest_target dict if needed later
+                # closest_target['distance'] = math.sqrt(min_dist_sq)
+
+        return all_detections_after_nms, closest_target
 
 
     def _processing_loop(self):
@@ -265,8 +310,8 @@ class AIProcessor:
 
             inference_end_time = time.perf_counter()
 
-            # 3. Postprocess
-            detections = self._postprocess(outputs, scale_ratio, pad_offset, frame.shape)
+            # 3. Postprocess (now returns detections AND closest_target)
+            detections, closest_target = self._postprocess(outputs, scale_ratio, pad_offset, frame.shape) # Pass frame_shape
             postprocess_end_time = time.perf_counter()
 
             # Timing logs (optional)
@@ -274,14 +319,15 @@ class AIProcessor:
             t_inference = (inference_end_time - preprocess_end_time) * 1000
             t_postprocess = (postprocess_end_time - inference_end_time) * 1000
             t_total = (postprocess_end_time - start_time) * 1000
-            logger.debug(f"Processing Time: Total={t_total:.1f}ms (Pre={t_preprocess:.1f} + Infer={t_inference:.1f} + Post={t_postprocess:.1f}), Detections: {len(detections)}")
+            logger.debug(f"Processing Time: Total={t_total:.1f}ms (Pre={t_preprocess:.1f} + Infer={t_inference:.1f} + Post={t_postprocess:.1f}), Detections: {len(detections)}, Closest: {'Yes' if closest_target else 'No'}")
 
             # 4. Put results into the output queue
-            # Combine original frame and detections
+            # Combine original frame, all detections, and the specific closest target
             result_data = {
                 'timestamp': timestamp,
                 'frame': frame, # Pass the original frame along
-                'detections': detections
+                'detections': detections,
+                'closest_target': closest_target # Add the closest target info
             }
             try:
                 self.results_queue.put(result_data, timeout=0.1)

@@ -2,6 +2,8 @@ opencv-python>=4.8.0
 numpy>=1.24.0
 onnxruntime>=1.15.0 # Or onnxruntime-gpu if GPU is intended and compatible
 mss>=9.0.0
-# pyyaml>=6.0 # Removed, config hardcoded
-# cryptography>=42.0 # Removed, config hardcoded
-ultralytics>=8.0.0 # Optional: For easy access to YOLO models/utils if needed later, though we'll use ONNX directly 
+pywin32; platform_system=="Windows"
+pyobjc; platform_system=="Darwin"
+pynput # For hotkeys and mouse control
+ultralytics>=8.0.0 # Optional: For easy access to YOLO models/utils if needed later
+# pygrabber (Only if using camera input and having issues finding cameras on Windows) 

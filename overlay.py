@@ -4,6 +4,7 @@ from utils import logger, FPSCounter
 import socket
 import struct # For packing frame size
 import importlib
+import math # For snap line distance calculation (optional)
 
 # --- Dynamic Imports ---
 _cv2 = None
@@ -43,33 +44,66 @@ class OverlayRenderer:
             'green': (0, 255, 0),
             'blue': (255, 0, 0),
             'white': (255, 255, 255),
-            'black': (0, 0, 0)
+            'black': (0, 0, 0),
+            'yellow': (0, 255, 255), # Added for closest target
+            'cyan': (255, 255, 0)   # Added for snap lines
         }
         self.default_box_color = self.colors['red']
+        self.closest_box_color = self.colors['yellow']
+        self.snap_line_color = self.colors['cyan']
         self.default_text_color = self.colors['white']
         _lazy_load_cv2() # Ensure cv2 is loaded
 
-    def draw_overlays(self, frame, detections):
-        """Draws bounding boxes and info for detected objects."""
+    def draw_overlays(self, frame, detections, closest_target):
+        """Draws bounding boxes, info, snap lines, and highlights the closest target."""
         if frame is None:
             return None
 
         display_frame = frame.copy()
+        frame_h, frame_w = display_frame.shape[:2]
+        screen_center_x, screen_center_y = frame_w // 2, frame_h // 2
+
+        # Draw crosshair (simple lines)
+        crosshair_color = self.colors['green']
+        crosshair_size = 10
+        _cv2.line(display_frame, (screen_center_x - crosshair_size, screen_center_y),
+                 (screen_center_x + crosshair_size, screen_center_y), crosshair_color, 1)
+        _cv2.line(display_frame, (screen_center_x, screen_center_y - crosshair_size),
+                 (screen_center_x, screen_center_y + crosshair_size), crosshair_color, 1)
+
+        # Check if detections is a list
+        if not isinstance(detections, list):
+             logger.warning(f"draw_overlays received non-list detections: {type(detections)}")
+             detections = [] # Prevent errors
 
         for det in detections:
             try:
                 bbox = det['bbox'] # [x_min, y_min, x_max, y_max]
                 confidence = det['confidence']
                 class_id = det['class_id']
+                is_closest = det.get('is_closest', False) # Get the flag
 
                 x1, y1, x2, y2 = map(int, bbox)
+                box_center_x = (x1 + x2) // 2
+                box_center_y = (y1 + y2) // 2
+
+                # Determine box color and thickness
+                box_color = self.closest_box_color if is_closest else self.default_box_color
+                box_thickness = 3 if is_closest else 2
 
                 # Draw bounding box
-                _cv2.rectangle(display_frame, (x1, y1), (x2, y2), self.default_box_color, 2)
+                _cv2.rectangle(display_frame, (x1, y1), (x2, y2), box_color, box_thickness)
+
+                # Draw snap line from center screen to box center
+                _cv2.line(display_frame, (screen_center_x, screen_center_y),
+                         (box_center_x, box_center_y), self.snap_line_color, 1)
 
                 # Prepare label text
                 # TODO: Map class_id to label name if available
                 label = f"ID:{class_id} {confidence:.2f}"
+                # Optional: Add distance if calculated and needed
+                # dist = math.sqrt((box_center_x - screen_center_x)**2 + (box_center_y - screen_center_y)**2)
+                # label += f" D:{dist:.0f}"
 
                 # Calculate text size and position
                 (text_width, text_height), baseline = _cv2.getTextSize(label, _cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)

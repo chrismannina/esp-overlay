@@ -4,43 +4,51 @@ import threading
 from queue import Queue, Empty
 import sys
 
-from utils import logger, load_config
+from utils import logger
 from capture import get_capture_source
 from processing import AIProcessor
 from overlay import OverlayRenderer
 
+# Import constants
+from config_constants import (
+    CONFIG_CAPTURE_TYPE, CONFIG_DEVICE_INDEX, CONFIG_RESOLUTION, CONFIG_FPS,
+    CONFIG_MONITOR, CONFIG_REGION, CONFIG_MODEL_PATH, CONFIG_CONF_THRESHOLD,
+    CONFIG_NMS_THRESHOLD, CONFIG_CLASSES_TO_DETECT, CONFIG_SHOW_FPS,
+    CONFIG_WINDOW_TITLE, CONFIG_FRAME_QUEUE_SIZE, CONFIG_USE_GPU
+)
+
 def main():
-    # Load configuration
-    config = load_config()
-    if config is None:
-        logger.error("Failed to load configuration. Exiting.")
-        sys.exit(1)
+    # Load configuration - REMOVED
+    # config = load_config()
+    # if config is None:
+    #     logger.error("Failed to load configuration. Exiting.")
+    #     sys.exit(1)
 
     # Create shared queues
     # Queue for raw frames from capture to processing
-    frame_queue_size = config.get('frame_queue_size', 2)
-    frame_queue = Queue(maxsize=frame_queue_size)
+    # frame_queue_size = config.get('frame_queue_size', 2)
+    frame_queue = Queue(maxsize=CONFIG_FRAME_QUEUE_SIZE)
     # Queue for processed results (frame + detections) from processing to display
     # Make this queue slightly larger to handle potential display fluctuations
-    results_queue = Queue(maxsize=frame_queue_size + 2)
+    results_queue = Queue(maxsize=CONFIG_FRAME_QUEUE_SIZE + 2)
 
     # --- Initialize Modules ---
     # Capture Module (runs in its own thread)
-    capture_source = get_capture_source(config, frame_queue)
+    capture_source = get_capture_source(frame_queue) # Pass queue directly
 
     # AI Processing Module (runs in its own thread)
-    # Ensure AI config exists
-    if 'ai' not in config:
-        logger.error("'ai' section missing in config.yaml. Exiting.")
-        sys.exit(1)
-    ai_processor = AIProcessor(frame_queue, results_queue, config)
+    # Ensure AI config exists - No longer needed, values are hardcoded
+    # if 'ai' not in config:
+    #     logger.error("'ai' section missing in config.yaml. Exiting.")
+    #     sys.exit(1)
+    ai_processor = AIProcessor(frame_queue, results_queue) # Pass queues directly
 
     # Overlay and Output Module (runs in the main thread)
-    # Ensure output config exists
-    if 'output' not in config:
-        logger.error("'output' section missing in config.yaml. Exiting.")
-        sys.exit(1)
-    overlay_renderer = OverlayRenderer(config)
+    # Ensure output config exists - No longer needed
+    # if 'output' not in config:
+    #     logger.error("'output' section missing in config.yaml. Exiting.")
+    #     sys.exit(1)
+    overlay_renderer = OverlayRenderer() # Initialize directly
 
     # --- Start Threads ---
     capture_source.start()

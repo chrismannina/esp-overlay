@@ -2,24 +2,12 @@
 import time
 import yaml
 import logging
+import os
+from cryptography.fernet import Fernet
 
 # Basic logging setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(threadName)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-def load_config(path="config.yaml"):
-    """Loads configuration from a YAML file."""
-    try:
-        with open(path, 'r') as f:
-            config = yaml.safe_load(f)
-        logger.info(f"Configuration loaded from {path}")
-        return config
-    except FileNotFoundError:
-        logger.error(f"Configuration file not found at {path}")
-        return None
-    except Exception as e:
-        logger.error(f"Error loading configuration: {e}")
-        return None
 
 class FPSCounter:
     """A simple class to calculate and display FPS."""

@@ -1,12 +1,40 @@
 # capture.py
-import cv2
-import mss
+# import cv2 # Dynamic import
+# import mss # Dynamic import
 import numpy as np
 import time
 import threading
+import importlib
 from queue import Queue, Full
 from abc import ABC, abstractmethod
 from utils import logger
+# Import constants from main (or define them here)
+from config_constants import (
+    CONFIG_DEVICE_INDEX, CONFIG_RESOLUTION, CONFIG_FPS, 
+    CONFIG_MONITOR, CONFIG_REGION, CONFIG_CAPTURE_TYPE
+)
+
+# --- Dynamic Imports ---
+_cv2 = None
+_mss = None
+
+def _lazy_load_deps():
+    global _cv2, _mss
+    if _cv2 is None:
+        try:
+            _cv2 = importlib.import_module("cv2")
+            logger.debug("cv2 loaded dynamically.")
+        except ImportError:
+            logger.error("Failed to import cv2. Please ensure OpenCV is installed.")
+            raise # Re-raise to stop execution if critical
+    if _mss is None:
+        try:
+            _mss = importlib.import_module("mss")
+            logger.debug("mss loaded dynamically.")
+        except ImportError:
+             logger.error("Failed to import mss. Please ensure mss is installed.")
+             raise # Re-raise to stop execution if critical
+# --- End Dynamic Imports ---
 
 class BaseCapture(ABC):
     """Abstract base class for different capture methods."""
@@ -54,17 +82,19 @@ class BaseCapture(ABC):
 
 class WebcamCapture(BaseCapture):
     """Captures video from a webcam or UVC device like Elgato Neo."""
-    def __init__(self, frame_queue, config):
+    def __init__(self, frame_queue):
         super().__init__(frame_queue)
-        self.device_index = config['capture']['device_index']
-        self.target_resolution = tuple(config['capture'].get('resolution')) if config['capture'].get('resolution') else None
-        self.target_fps = config['capture'].get('fps')
+        self.device_index = CONFIG_DEVICE_INDEX
+        self.target_resolution = tuple(CONFIG_RESOLUTION) if CONFIG_RESOLUTION else None
+        self.target_fps = CONFIG_FPS
+        _lazy_load_deps() # Ensure deps are loaded before use
         self.cap = None
 
     def _capture_loop(self):
         try:
             logger.info(f"Initializing webcam/UVC device index: {self.device_index}")
-            self.cap = cv2.VideoCapture(self.device_index, cv2.CAP_ANY) # Use CAP_ANY or just omit the second arg
+            # self.cap = cv2.VideoCapture(self.device_index, cv2.CAP_ANY)
+            self.cap = _cv2.VideoCapture(self.device_index, _cv2.CAP_ANY) # Use loaded module
 
             if not self.cap.isOpened():
                 logger.error(f"Failed to open video capture device {self.device_index}.")
@@ -74,17 +104,23 @@ class WebcamCapture(BaseCapture):
             # --- Configure Capture Properties ---
             if self.target_resolution:
                 logger.info(f"Setting resolution to {self.target_resolution}")
-                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.target_resolution[0])
-                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.target_resolution[1])
+                # self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.target_resolution[0])
+                # self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.target_resolution[1])
+                self.cap.set(_cv2.CAP_PROP_FRAME_WIDTH, self.target_resolution[0])
+                self.cap.set(_cv2.CAP_PROP_FRAME_HEIGHT, self.target_resolution[1])
 
             if self.target_fps:
                 logger.info(f"Setting FPS to {self.target_fps}")
-                self.cap.set(cv2.CAP_PROP_FPS, self.target_fps)
+                # self.cap.set(cv2.CAP_PROP_FPS, self.target_fps)
+                self.cap.set(_cv2.CAP_PROP_FPS, self.target_fps)
 
             # --- Read Actual Properties ---
-            self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            self.fps = self.cap.get(cv2.CAP_PROP_FPS)
+            # self.width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            # self.height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            # self.fps = self.cap.get(cv2.CAP_PROP_FPS)
+            self.width = int(self.cap.get(_cv2.CAP_PROP_FRAME_WIDTH))
+            self.height = int(self.cap.get(_cv2.CAP_PROP_FRAME_HEIGHT))
+            self.fps = self.cap.get(_cv2.CAP_PROP_FPS)
             logger.info(f"Capture device opened: {self.width}x{self.height} @ {self.fps:.2f} FPS")
 
             if self.width == 0 or self.height == 0:
@@ -126,16 +162,17 @@ class WebcamCapture(BaseCapture):
 
 class ScreenCapture(BaseCapture):
     """Captures video from a screen region."""
-    def __init__(self, frame_queue, config):
+    def __init__(self, frame_queue):
         super().__init__(frame_queue)
-        self.monitor_number = config['capture'].get('monitor', 1)
-        self.region = config['capture'].get('region')
+        self.monitor_number = CONFIG_MONITOR
+        self.region = CONFIG_REGION
+        _lazy_load_deps() # Ensure deps are loaded before use
         self.sct = None
         self.monitor = None
 
     def _capture_loop(self):
         try:
-            with mss.mss() as self.sct:
+            with _mss.mss() as self.sct:
                 monitors = self.sct.monitors
                 if self.monitor_number >= len(monitors) or self.monitor_number < 1:
                     logger.error(f"Invalid monitor number {self.monitor_number}. Available monitors: {len(monitors) -1}")
@@ -175,7 +212,8 @@ class ScreenCapture(BaseCapture):
                     if sct_img:
                         # Convert to OpenCV format (BGRA to BGR)
                         frame = np.array(sct_img)
-                        frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+                        # frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+                        frame = _cv2.cvtColor(frame, _cv2.COLOR_BGRA2BGR)
 
                         try:
                             self.frame_queue.put_nowait((time.time(), frame))
@@ -200,18 +238,26 @@ class ScreenCapture(BaseCapture):
         finally:
              logger.info("Screen capture resources released.")
 
-def get_capture_source(config, frame_queue):
+def get_capture_source(frame_queue):
     """Factory function to create the appropriate capture source based on config."""
-    capture_type = config.get('capture', {}).get('type', 'webcam').lower()
+    capture_type = CONFIG_CAPTURE_TYPE.lower()
     logger.info(f"Selected capture type: {capture_type}")
 
     if capture_type == 'webcam' or capture_type == 'elgato':
         # Treat Elgato Neo as a UVC webcam
-        return WebcamCapture(frame_queue, config)
+        return WebcamCapture(frame_queue)
     elif capture_type == 'screen':
-        return ScreenCapture(frame_queue, config)
+        return ScreenCapture(frame_queue)
     else:
         logger.error(f"Unsupported capture type: {capture_type}. Defaulting to webcam.")
-        # Default fallback
-        config['capture']['type'] = 'webcam' # Correct config for fallback
-        return WebcamCapture(frame_queue, config) 
+        # Default fallback - Note: This now hardcodes the fallback type too
+        # If you want a dynamic fallback, you might need more complex logic
+        # For now, it uses the hardcoded type or errors if unsupported
+        if 'webcam' in ['webcam', 'elgato']: # Check if default is valid
+             return WebcamCapture(frame_queue)
+        else:
+             # If the primary hardcoded type is invalid AND webcam isn't allowed,
+             # we have an issue. Raise or log critical error.
+             logger.critical("Unsupported hardcoded capture type AND fallback 'webcam' not viable!")
+             # Decide how to handle: raise Exception("Invalid config") or return None
+             return None # Or raise error 

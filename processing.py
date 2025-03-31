@@ -1,19 +1,46 @@
 # processing.py
-import onnxruntime as ort
+# import onnxruntime as ort # Dynamic import
 import numpy as np
 import time
 import threading
+import importlib
 from queue import Queue, Empty
 from utils import logger
-import cv2 # Needed for preprocessing/NMS if not handled by model directly
+# import cv2 # Dynamic import
+# Import constants from main (or define them here)
+from config_constants import (
+    CONFIG_MODEL_PATH, CONFIG_CONF_THRESHOLD, CONFIG_NMS_THRESHOLD,
+    CONFIG_CLASSES_TO_DETECT, CONFIG_USE_GPU
+)
+
+# --- Dynamic Imports ---
+_ort = None
+_cv2 = None
+
+def _lazy_load_deps():
+    global _ort, _cv2
+    if _ort is None:
+        try:
+            _ort = importlib.import_module("onnxruntime")
+            logger.debug("onnxruntime loaded dynamically.")
+        except ImportError:
+            logger.error("Failed to import onnxruntime. Please ensure it or onnxruntime-gpu is installed.")
+            raise # Re-raise to stop execution if critical
+    if _cv2 is None:
+        try:
+            _cv2 = importlib.import_module("cv2")
+            logger.debug("cv2 loaded dynamically for processing.")
+        except ImportError:
+            logger.error("Failed to import cv2. Please ensure OpenCV is installed.")
+            raise # Re-raise to stop execution if critical
+# --- End Dynamic Imports ---
 
 class AIProcessor:
     """Handles AI model inference in a separate thread."""
-    def __init__(self, frame_queue, results_queue, config):
+    def __init__(self, frame_queue, results_queue):
         self.frame_queue = frame_queue
         self.results_queue = results_queue
-        self.config = config['ai']
-        self.use_gpu = config.get('use_gpu', False)
+        self.use_gpu = CONFIG_USE_GPU
 
         self._stop_event = threading.Event()
         self._processing_thread = None
@@ -22,14 +49,15 @@ class AIProcessor:
         self.input_name = None
         self.input_shape = None # Expected input shape (batch, height, width, channels)
 
+        _lazy_load_deps() # Ensure dependencies can be loaded early
         self._load_model()
 
     def _load_model(self):
         """Loads the ONNX model and prepares the inference session."""
-        model_path = self.config['model_path']
+        model_path = CONFIG_MODEL_PATH
         logger.info(f"Loading ONNX model from: {model_path}")
         try:
-            providers = ort.get_available_providers()
+            providers = _ort.get_available_providers()
             logger.info(f"Available ONNX Runtime providers: {providers}")
             provider_options = []
             chosen_provider = 'CPUExecutionProvider'
@@ -46,7 +74,7 @@ class AIProcessor:
                  logger.info("Using CPU provider for ONNX Runtime.")
 
             logger.info(f"Using ONNX Runtime provider: {chosen_provider}")
-            self.session = ort.InferenceSession(model_path, providers=[chosen_provider], provider_options=provider_options)
+            self.session = _ort.InferenceSession(model_path, providers=[chosen_provider], provider_options=provider_options)
 
             # Get model input details
             input_meta = self.session.get_inputs()[0]
@@ -55,22 +83,24 @@ class AIProcessor:
             logger.info(f"Model loaded. Input name: {self.input_name}, Expected input shape: {self.input_shape}")
 
             # Basic check for typical YOLO input shape (adjust if your model differs)
-            if len(self.input_shape) != 4 or self.input_shape[0] != 1:
+            if not isinstance(self.input_shape, list) or len(self.input_shape) != 4 or not isinstance(self.input_shape[0], (int, str)) or self.input_shape[0] != 1:
                  logger.warning("Model input shape might not be standard BHWC or BCHW. Ensure preprocessing matches.")
 
         except Exception as e:
             logger.error(f"Failed to load ONNX model or create session: {e}", exc_info=True)
             self.session = None # Ensure session is None if loading failed
 
-    def _preprocess(self, frame):
+    def _preprocess(self, frame): # Simplified H/W indices
         """Prepares a frame for the ONNX model. Assumes YOLOv5 style preprocessing."""
         if self.input_shape is None:
             logger.error("Cannot preprocess: Model input shape not determined.")
             return None
 
-        # Assuming input shape is [batch, channels, height, width]
-        model_height = self.input_shape[2]
-        model_width = self.input_shape[3]
+        # Assuming BCHW format [batch, channels, height, width] which is standard for YOLOv5
+        # Example shape: [1, 3, 640, 640]
+        h_idx, w_idx = 2, 3
+        model_height = self.input_shape[h_idx]
+        model_width = self.input_shape[w_idx]
 
         # 1. Resize and Pad
         img = frame.copy()
@@ -81,11 +111,11 @@ class AIProcessor:
         dw, dh = (model_width - new_unpad_w) / 2, (model_height - new_unpad_h) / 2
 
         if (img_width, img_height) != (new_unpad_w, new_unpad_h):
-            img = cv2.resize(img, (new_unpad_w, new_unpad_h), interpolation=cv2.INTER_LINEAR)
+            img = _cv2.resize(img, (new_unpad_w, new_unpad_h), interpolation=_cv2.INTER_LINEAR)
 
         top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
         left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
-        img = cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114))
+        img = _cv2.copyMakeBorder(img, top, bottom, left, right, _cv2.BORDER_CONSTANT, value=(114, 114, 114))
 
         # 2. BGR to RGB and HWC to CHW
         img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, HWC to CHW
@@ -106,14 +136,14 @@ class AIProcessor:
         predictions = outputs[0][0] # Get predictions for the first (only) image in the batch
 
         # Filter by confidence
-        conf_thres = self.config['confidence_threshold']
+        conf_thres = CONFIG_CONF_THRESHOLD
         candidates = predictions[predictions[:, 4] > conf_thres]
 
         if not candidates.shape[0]:
             return []
 
         # Filter by class if specified
-        classes_to_detect = self.config.get('classes_to_detect')
+        classes_to_detect = CONFIG_CLASSES_TO_DETECT
         if classes_to_detect is not None and len(classes_to_detect) > 0:
             class_probs = candidates[:, 5:]
             class_indices = np.argmax(class_probs, axis=1)
@@ -158,18 +188,24 @@ class AIProcessor:
         boxes_xyxy[:, [1, 3]] = np.clip(boxes_xyxy[:, [1, 3]], 0, frame_h)
 
         # Perform Non-Maximum Suppression (NMS)
-        confidences = candidates[:, 4]
-        nms_thres = self.config['nms_threshold']
+        # If cv2 is available, use its NMS implementation
+        if _cv2:
+            confidences = candidates[:, 4]
+            nms_thres = CONFIG_NMS_THRESHOLD
 
-        # Use cv2.dnn.NMSBoxes for simplicity
-        # Convert boxes to required format (x, y, w, h)
-        boxes_for_nms = np.zeros_like(boxes_xyxy)
-        boxes_for_nms[:, 0] = boxes_xyxy[:, 0]
-        boxes_for_nms[:, 1] = boxes_xyxy[:, 1]
-        boxes_for_nms[:, 2] = boxes_xyxy[:, 2] - boxes_xyxy[:, 0]
-        boxes_for_nms[:, 3] = boxes_xyxy[:, 3] - boxes_xyxy[:, 1]
+            # Convert boxes to required format (x, y, w, h)
+            boxes_for_nms = np.zeros_like(boxes_xyxy)
+            boxes_for_nms[:, 0] = boxes_xyxy[:, 0]
+            boxes_for_nms[:, 1] = boxes_xyxy[:, 1]
+            boxes_for_nms[:, 2] = boxes_xyxy[:, 2] - boxes_xyxy[:, 0] # width
+            boxes_for_nms[:, 3] = boxes_xyxy[:, 3] - boxes_xyxy[:, 1] # height
 
-        indices = cv2.dnn.NMSBoxes(boxes_for_nms.tolist(), confidences.tolist(), conf_thres, nms_thres)
+            indices = _cv2.dnn.NMSBoxes(boxes_for_nms.tolist(), confidences.tolist(), conf_thres, nms_thres)
+        else:
+            # Fallback: If OpenCV isn't loaded (error), skip NMS or implement a basic one here
+            logger.warning("cv2 not available for NMS, skipping NMS step!")
+            # Create indices for all remaining candidates if no NMS
+            indices = np.arange(len(boxes_xyxy))
 
         detections = []
         if len(indices) > 0:

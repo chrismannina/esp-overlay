@@ -9,9 +9,12 @@ import math # Added for aim assist calculation
 from pynput import keyboard, mouse
 
 from utils import logger
+from state import AppState
 from capture import get_capture_source
 from processing import AIProcessor
 from overlay import OverlayRenderer
+from input_handler import InputHandler
+from aim_assist import AimAssist
 
 # Import constants
 from config_constants import (
@@ -124,109 +127,94 @@ def aim_assist_loop():
 
 
 def main():
-    global program_running, current_closest_target, screen_center_x, screen_center_y, state_lock, esp_enabled, aim_assist_enabled
+    app_state = AppState()
 
-    # Initialize module variables to None for robust cleanup
+    # Initialize modules
     capture_source = None
     ai_processor = None
     overlay_renderer = None
-    listener_thread = None
-    aim_thread = None
+    input_handler = None
+    aim_assist = None
 
     try:
         # Create shared queues
         frame_queue = Queue(maxsize=CONFIG_FRAME_QUEUE_SIZE)
-        results_queue = Queue(maxsize=CONFIG_FRAME_QUEUE_SIZE + 2)
+        results_queue = Queue(maxsize=CONFIG_FRAME_QUEUE_SIZE + 2) # Slightly larger
 
         # --- Initialize Modules ---
+        # Pass app_state where needed
         capture_source = get_capture_source(frame_queue)
         ai_processor = AIProcessor(frame_queue, results_queue)
         overlay_renderer = OverlayRenderer()
+        input_handler = InputHandler(app_state)
+        aim_assist = AimAssist(app_state)
 
-        # --- Start Threads ---
+        # --- Start Background Threads ---
         capture_source.start()
         time.sleep(1) # Give capture time to initialize
 
-        # Get capture dimensions for aim assist
+        # Set screen center in AppState after capture starts
         width, height, _ = capture_source.get_properties()
         if width > 0 and height > 0:
-            screen_center_x = width // 2
-            screen_center_y = height // 2
-            logger.info(f"Capture dimensions received: {width}x{height}. Screen center: ({screen_center_x}, {screen_center_y})")
+            app_state.screen_center_x = width // 2
+            app_state.screen_center_y = height // 2
+            logger.info(f"Capture dimensions received: {width}x{height}. Screen center set in AppState.")
         else:
-            logger.warning("Capture source failed to provide valid dimensions. Aim assist might not work correctly.")
-            # Fallback - try getting from config? Or use a reasonable default.
+            logger.warning("Capture source failed to provide valid dimensions.")
+            # Fallback logic (moved here from old main)
             try:
                 res = CONFIG_RESOLUTION
                 if res and len(res) == 2:
-                    screen_center_x = res[0] // 2
-                    screen_center_y = res[1] // 2
-                    logger.info(f"Using fallback center from config: ({screen_center_x}, {screen_center_y})")
+                    app_state.screen_center_x = res[0] // 2
+                    app_state.screen_center_y = res[1] // 2
+                    logger.info(f"Using fallback center from config: ({app_state.screen_center_x}, {app_state.screen_center_y})")
                 else: raise ValueError("Invalid config resolution")
             except Exception:
-                screen_center_x = 1920 // 2 # Last resort default
-                screen_center_y = 1080 // 2
-                logger.warning(f"Using default screen center: ({screen_center_x}, {screen_center_y})")
-
+                app_state.screen_center_x = 1920 // 2 # Last resort default
+                app_state.screen_center_y = 1080 // 2
+                logger.warning(f"Using default screen center: ({app_state.screen_center_x}, {app_state.screen_center_y})")
 
         ai_processor.start()
-
-        # Start helper threads
-        listener_thread = threading.Thread(target=keyboard_listener_thread, name="KeyboardListenerThread", daemon=True)
-        listener_thread.start()
-
-        aim_thread = threading.Thread(target=aim_assist_loop, name="AimAssistThread", daemon=True)
-        aim_thread.start()
-
+        input_handler.start()
+        aim_assist.start()
 
         logger.info("Main loop starting. Use hotkeys to control features.")
+
         # --- Main Display Loop ---
-        while program_running: # Check global flag controlled by hotkey listener
-            # Get the latest processed result
+        while app_state.program_running:
             try:
+                # Get the latest processed result
                 result_data = results_queue.get(timeout=0.5)
             except Empty:
-                if not program_running: break # Exit if flag was set while waiting
-                # Check if worker threads are alive (more robust check)
-                if not capture_source or not capture_source._capture_thread or not capture_source._capture_thread.is_alive():
-                    logger.error("Capture thread has stopped unexpectedly. Exiting.")
-                    program_running = False # Signal other threads
-                    break
-                if not ai_processor or not ai_processor._processing_thread or not ai_processor._processing_thread.is_alive():
-                    logger.error("Processing thread has stopped unexpectedly. Exiting.")
-                    program_running = False # Signal other threads
-                    break
-                continue # Continue loop if threads are okay but queue is empty
+                if not app_state.program_running: break # Check again after timeout
+                # Optional: Check if worker threads are alive (though they should exit if app_state.program_running is False)
+                # ... (add checks for capture_source._capture_thread.is_alive() etc. if needed)
+                continue
             except Exception as e:
                 logger.error(f"Error getting results from queue: {e}")
-                program_running = False # Signal other threads
+                app_state.request_shutdown()
                 break
 
             # Extract data
             frame = result_data.get('frame')
             detections = result_data.get('detections', [])
-            closest_target_from_queue = result_data.get('closest_target') # Can be None
+            closest_target_from_queue = result_data.get('closest_target')
 
             if frame is None:
                 logger.warning("Received None frame in main loop. Skipping display.")
                 continue
 
-            # Update shared target info for aim assist thread
-            with state_lock: # Use lock for writing shared state
-                current_closest_target = closest_target_from_queue
+            # Update shared state
+            app_state.current_closest_target = closest_target_from_queue
 
-            # Draw overlays only if ESP is enabled
+            # Draw overlays based on state
             display_frame = None
-            esp_on = False
-            with state_lock: esp_on = esp_enabled # Check state safely
-
-            if esp_on:
-                # Pass detections and the specific closest target to draw_overlays
+            if app_state.esp_enabled:
                 display_frame = overlay_renderer.draw_overlays(frame, detections, closest_target_from_queue)
             else:
-                # If ESP is off, show frame without detections but still call overlay logic
-                # to potentially show FPS or crosshair if those are desired even when ESP boxes are off.
-                display_frame = overlay_renderer.draw_overlays(frame, [], None) # Pass empty detections
+                # Still draw the frame, but without ESP elements (boxes, lines)
+                # OverlayRenderer might still draw crosshair/FPS
+                display_frame = overlay_renderer.draw_overlays(frame, [], None)
 
             # Display the frame
             if display_frame is not None:
@@ -234,48 +222,34 @@ def main():
             else:
                 logger.debug("display_frame was None, skipping display.")
 
-
-            # Check for exit using cv2 window 'q' key
+            # Check for exit via OpenCV window 'q' key
             if overlay_renderer.check_exit_key(delay_ms=1):
                 logger.info("Output window closed or 'q' pressed, initiating shutdown.")
-                program_running = False # Signal other threads
-                break
-
+                app_state.request_shutdown()
+                break # Exit main loop immediately
 
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt received, initiating shutdown.")
-        program_running = False # Signal other threads
+        if app_state: app_state.request_shutdown()
     except Exception as e:
-        logger.error(f"Unhandled exception in main loop: {e}", exc_info=True)
-        program_running = False # Signal other threads
+        logger.error(f"Unhandled exception in main setup or loop: {e}", exc_info=True)
+        if app_state: app_state.request_shutdown()
     finally:
-        # --- Cleanup ---
+        # --- Cleanup --- (
         logger.info("Shutting down threads and resources...")
-        # Ensure program_running is false to signal threads cleanly
-        if program_running: # Check if it wasn't already set by exception/hotkey
-            with state_lock:
-                program_running = False
 
-        # Stop capture and processing threads first
-        if capture_source: capture_source.stop()
+        # Ensure shutdown is signaled (might be redundant but safe)
+        if app_state: app_state.request_shutdown()
+
+        # Stop threads in reverse order of dependency (or based on function)
+        if aim_assist: aim_assist.stop()
+        if input_handler: input_handler.stop()
         if ai_processor: ai_processor.stop()
+        if capture_source: capture_source.stop()
 
-        # Wait gently for aim thread (it's daemon, but helps ensure clean exit)
-        if aim_thread and aim_thread.is_alive():
-            logger.debug("Waiting for AimAssistThread...")
-            aim_thread.join(timeout=1.0)
-            if aim_thread.is_alive():
-                logger.warning("Aim assist thread did not exit cleanly.")
+        # Cleanup display last
+        if overlay_renderer: overlay_renderer.cleanup()
 
-        # Wait gently for keyboard listener thread
-        if listener_thread and listener_thread.is_alive():
-            logger.debug("Waiting for KeyboardListenerThread...")
-            listener_thread.join(timeout=1.0) # Listener should stop when program_running becomes False
-            if listener_thread.is_alive():
-                logger.warning("Keyboard listener thread did not exit cleanly.")
-
-
-        if overlay_renderer: overlay_renderer.cleanup() # Close CV2 windows
         logger.info("Application finished.")
 
 if __name__ == "__main__":

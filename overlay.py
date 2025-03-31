@@ -1,24 +1,13 @@
 # overlay.py
 # import cv2 # Dynamic import
-from utils import logger, FPSCounter
-import socket
-import struct # For packing frame size
-import importlib
-import math # For snap line distance calculation (optional)
+# import socket # No longer used
+# import struct # No longer used
+# import importlib # No longer used
+import math
+from utils import logger, FPSCounter, get_cv2 # Import getter
 
-# --- Dynamic Imports ---
-_cv2 = None
-
-def _lazy_load_cv2():
-    global _cv2
-    if _cv2 is None:
-        try:
-            _cv2 = importlib.import_module("cv2")
-            logger.debug("cv2 loaded dynamically for overlay.")
-        except ImportError:
-            logger.error("Failed to import cv2. Please ensure OpenCV is installed.")
-            raise # Re-raise to stop execution if critical
-# --- End Dynamic Imports ---
+# --- Removed Dynamic Imports Section ---
+# No longer need _cv2 global or _lazy_load_cv2 here
 
 # Import constants from main (or define them here)
 from config_constants import (CONFIG_SHOW_FPS, CONFIG_WINDOW_TITLE)
@@ -52,7 +41,8 @@ class OverlayRenderer:
         self.closest_box_color = self.colors['yellow']
         self.snap_line_color = self.colors['cyan']
         self.default_text_color = self.colors['white']
-        _lazy_load_cv2() # Ensure cv2 is loaded
+        # _lazy_load_cv2() # Removed
+        self.cv2 = get_cv2() # Get cv2 when needed
 
     def draw_overlays(self, frame, detections, closest_target):
         """Draws bounding boxes, info, snap lines, and highlights the closest target."""
@@ -66,9 +56,10 @@ class OverlayRenderer:
         # Draw crosshair (simple lines)
         crosshair_color = self.colors['green']
         crosshair_size = 10
-        _cv2.line(display_frame, (screen_center_x - crosshair_size, screen_center_y),
+        # Use self.cv2
+        self.cv2.line(display_frame, (screen_center_x - crosshair_size, screen_center_y),
                  (screen_center_x + crosshair_size, screen_center_y), crosshair_color, 1)
-        _cv2.line(display_frame, (screen_center_x, screen_center_y - crosshair_size),
+        self.cv2.line(display_frame, (screen_center_x, screen_center_y - crosshair_size),
                  (screen_center_x, screen_center_y + crosshair_size), crosshair_color, 1)
 
         # Check if detections is a list
@@ -92,10 +83,10 @@ class OverlayRenderer:
                 box_thickness = 3 if is_closest else 2
 
                 # Draw bounding box
-                _cv2.rectangle(display_frame, (x1, y1), (x2, y2), box_color, box_thickness)
+                self.cv2.rectangle(display_frame, (x1, y1), (x2, y2), box_color, box_thickness)
 
                 # Draw snap line from center screen to box center
-                _cv2.line(display_frame, (screen_center_x, screen_center_y),
+                self.cv2.line(display_frame, (screen_center_x, screen_center_y),
                          (box_center_x, box_center_y), self.snap_line_color, 1)
 
                 # Prepare label text
@@ -106,16 +97,16 @@ class OverlayRenderer:
                 # label += f" D:{dist:.0f}"
 
                 # Calculate text size and position
-                (text_width, text_height), baseline = _cv2.getTextSize(label, _cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                (text_width, text_height), baseline = self.cv2.getTextSize(label, self.cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
                 text_x = x1
                 text_y = y1 - 10 # Position text above the box
                 if text_y < 10: # If too close to top edge, put below box
                     text_y = y2 + text_height + 5
 
                 # Draw background rectangle for text for better visibility
-                _cv2.rectangle(display_frame, (text_x, text_y - text_height - baseline), (text_x + text_width, text_y + baseline), self.colors['black'], _cv2.FILLED)
+                self.cv2.rectangle(display_frame, (text_x, text_y - text_height - baseline), (text_x + text_width, text_y + baseline), self.colors['black'], self.cv2.FILLED)
                 # Draw label text
-                _cv2.putText(display_frame, label, (text_x, text_y), _cv2.FONT_HERSHEY_SIMPLEX, 0.5, self.default_text_color, 1, _cv2.LINE_AA)
+                self.cv2.putText(display_frame, label, (text_x, text_y), self.cv2.FONT_HERSHEY_SIMPLEX, 0.5, self.default_text_color, 1, self.cv2.LINE_AA)
 
             except Exception as e:
                 logger.error(f"Error drawing detection {det}: {e}", exc_info=False) # Avoid excessive logging
@@ -124,25 +115,25 @@ class OverlayRenderer:
         if self.show_fps:
             fps = self.fps_counter.update() # Update FPS based on display rate
             fps_text = f"FPS: {fps:.2f}"
-            _cv2.putText(display_frame, fps_text, (10, 30), _cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.colors['green'], 2, _cv2.LINE_AA)
+            self.cv2.putText(display_frame, fps_text, (10, 30), self.cv2.FONT_HERSHEY_SIMPLEX, 0.7, self.colors['green'], 2, self.cv2.LINE_AA)
 
         return display_frame
 
     def display_frame(self, frame):
         """Displays the frame in an OpenCV window."""
         if frame is not None:
-            _cv2.imshow(self.window_title, frame)
+            self.cv2.imshow(self.window_title, frame)
         else:
             logger.warning("Attempted to display a None frame.")
 
     def check_exit_key(self, delay_ms=1):
         """Waits for a key press and returns True if 'q' is pressed."""
-        key = _cv2.waitKey(delay_ms) & 0xFF
+        key = self.cv2.waitKey(delay_ms) & 0xFF
         return key == ord('q')
 
     def cleanup(self):
         """Closes OpenCV display windows."""
         logger.info("Closing display windows.")
         # self.sock.close() # No socket to close
-        _cv2.destroyAllWindows() # Need this for local display
+        self.cv2.destroyAllWindows() # Need this for local display
         logger.info("OverlayRenderer cleanup finished.") 

@@ -3,10 +3,10 @@
 import numpy as np
 import time
 import threading
-import importlib
+# import importlib # No longer needed
 import math # Added for distance calculation
 from queue import Queue, Empty, Full # Added Full exception
-from utils import logger, resource_path # Added resource_path
+from utils import logger, resource_path, get_ort, get_cv2 # Import getters
 # import cv2 # Dynamic import
 # Import constants from main (or define them here)
 from config_constants import (
@@ -14,27 +14,8 @@ from config_constants import (
     CONFIG_CLASSES_TO_DETECT, CONFIG_USE_GPU
 )
 
-# --- Dynamic Imports ---
-_ort = None
-_cv2 = None
-
-def _lazy_load_deps():
-    global _ort, _cv2
-    if _ort is None:
-        try:
-            _ort = importlib.import_module("onnxruntime")
-            logger.debug("onnxruntime loaded dynamically.")
-        except ImportError:
-            logger.error("Failed to import onnxruntime. Please ensure it or onnxruntime-gpu is installed.")
-            raise # Re-raise to stop execution if critical
-    if _cv2 is None:
-        try:
-            _cv2 = importlib.import_module("cv2")
-            logger.debug("cv2 loaded dynamically for processing.")
-        except ImportError:
-            logger.error("Failed to import cv2. Please ensure OpenCV is installed.")
-            raise # Re-raise to stop execution if critical
-# --- End Dynamic Imports ---
+# --- Removed Dynamic Imports Section ---
+# No longer need _ort, _cv2 globals or _lazy_load_deps here
 
 class AIProcessor:
     """Handles AI model inference in a separate thread."""
@@ -50,7 +31,9 @@ class AIProcessor:
         self.input_name = None
         self.input_shape = None # Expected input shape (batch, height, width, channels)
 
-        _lazy_load_deps() # Ensure dependencies can be loaded early
+        # _lazy_load_deps() # Removed
+        self.ort = get_ort() # Get modules when needed
+        self.cv2 = get_cv2()
         self._load_model()
 
     def _load_model(self):
@@ -66,7 +49,8 @@ class AIProcessor:
 
         logger.info(f"Loading ONNX model from: {model_path}")
         try:
-            providers = _ort.get_available_providers()
+            # Use self.ort now
+            providers = self.ort.get_available_providers()
             logger.info(f"Available ONNX Runtime providers: {providers}")
             provider_options = []
             chosen_provider = 'CPUExecutionProvider'
@@ -83,7 +67,7 @@ class AIProcessor:
                  logger.info("Using CPU provider for ONNX Runtime.")
 
             logger.info(f"Using ONNX Runtime provider: {chosen_provider}")
-            self.session = _ort.InferenceSession(model_path, providers=[chosen_provider], provider_options=provider_options)
+            self.session = self.ort.InferenceSession(model_path, providers=[chosen_provider], provider_options=provider_options)
 
             # Get model input details
             input_meta = self.session.get_inputs()[0]
@@ -123,11 +107,12 @@ class AIProcessor:
         dw, dh = (model_width - new_unpad_w) / 2, (model_height - new_unpad_h) / 2
 
         if (img_width, img_height) != (new_unpad_w, new_unpad_h):
-            img = _cv2.resize(img, (new_unpad_w, new_unpad_h), interpolation=_cv2.INTER_LINEAR)
+            # Use self.cv2
+            img = self.cv2.resize(img, (new_unpad_w, new_unpad_h), interpolation=self.cv2.INTER_LINEAR)
 
         top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
         left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
-        img = _cv2.copyMakeBorder(img, top, bottom, left, right, _cv2.BORDER_CONSTANT, value=(114, 114, 114))
+        img = self.cv2.copyMakeBorder(img, top, bottom, left, right, self.cv2.BORDER_CONSTANT, value=(114, 114, 114))
 
         # 2. BGR to RGB and HWC to CHW
         img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, HWC to CHW
@@ -200,7 +185,7 @@ class AIProcessor:
         boxes_xyxy[:, [1, 3]] = np.clip(boxes_xyxy[:, [1, 3]], 0, frame_h)
 
         # Perform Non-Maximum Suppression (NMS)
-        if _cv2:
+        if self.cv2: # Check if cv2 loaded successfully
             confidences = candidates[:, 4]
             nms_thres = CONFIG_NMS_THRESHOLD
 
@@ -211,7 +196,8 @@ class AIProcessor:
             boxes_for_nms[:, 2] = boxes_xyxy[:, 2] - boxes_xyxy[:, 0] # width
             boxes_for_nms[:, 3] = boxes_xyxy[:, 3] - boxes_xyxy[:, 1] # height
 
-            indices = _cv2.dnn.NMSBoxes(boxes_for_nms.tolist(), confidences.tolist(), conf_thres, nms_thres)
+            # Use self.cv2
+            indices = self.cv2.dnn.NMSBoxes(boxes_for_nms.tolist(), confidences.tolist(), conf_thres, nms_thres)
         else:
             # Fallback: If OpenCV isn't loaded (error), skip NMS or implement a basic one here
             logger.warning("cv2 not available for NMS, skipping NMS step!")

@@ -1,6 +1,6 @@
 # Real-Time Game Video ESP Overlay - MVP
 
-This project is a Minimum Viable Product (MVP) for a real-time ESP (Extra Sensory Perception) video overlay, based on the architecture outlined in `dev_guide.md`. It captures video from various sources (webcam, Elgato capture card via UVC, screen), performs object detection using an ONNX model (e.g., YOLOv5), and displays the video feed with bounding box overlays in real-time.
+This project is a Minimum Viable Product (MVP) for a real-time ESP (Extra Sensory Perception) video overlay. It captures video from various sources (webcam, Elgato capture card via UVC, screen), performs object detection using an ONNX model (e.g., YOLOv5), and displays the video feed with bounding box overlays in real-time.
 
 ## Features
 
